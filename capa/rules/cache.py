@@ -138,6 +138,55 @@ def cache_ruleset(cache_dir: Path, ruleset: capa.rules.RuleSet):
     return
 
 
+def refresh_ruleset_path_metadata(
+    ruleset: capa.rules.RuleSet, rule_file_paths: list[Path], rule_contents: list[bytes]
+) -> None:
+    """
+    refresh the path-derived metadata (`capa/path` and `capa/nursery`) of the rules
+    in the given ruleset so that it reflects the current on-disk rule file layout.
+
+    the cache identifier is derived from rule *content* only (see `compute_cache_identifier`),
+    so a cached ruleset may outlive pure moves of rule files, such as a rule graduating
+    from the nursery subdirectory into the main rules directory without any content change.
+    without this refresh, a cache hit would keep reporting the rule's old path
+    and a stale nursery flag.
+
+    rules are matched to files by content hash. when multiple files share identical
+    content (ambiguous), a rule keeps its current path if it is still among the
+    candidates, and otherwise the lexicographically smallest candidate path is chosen,
+    so the result is deterministic.
+
+    note: this mutates the rules of the given ruleset in place.
+    """
+    paths_by_hash: dict[str, list[Path]] = {}
+    for path, content in zip(rule_file_paths, rule_contents):
+        paths_by_hash.setdefault(hashlib.sha256(content).hexdigest(), []).append(path)
+
+    for rule in ruleset.rules.values():
+        if rule.is_subscope_rule():
+            # subscope rules are derived from their parent rule and don't map to a file on disk.
+            continue
+
+        rule_hash = hashlib.sha256(rule.definition.encode("utf-8")).hexdigest()
+        candidates = paths_by_hash.get(rule_hash)
+        if not candidates:
+            # the cache identifier covers all rule contents, so a matching cache implies
+            # every rule's content is still on disk; be defensive anyway and keep
+            # the existing metadata rather than dropping the rule.
+            logger.warning("no rule file found on disk for cached rule: %s", rule.name)
+            continue
+
+        current_path = rule.meta.get("capa/path")
+        candidate_paths = [path.as_posix() for path in candidates]
+        if current_path in candidate_paths:
+            new_path = Path(str(current_path))
+        else:
+            new_path = min(candidates, key=lambda p: p.as_posix())
+
+        rule.meta["capa/path"] = new_path.as_posix()
+        rule.meta["capa/nursery"] = capa.rules.is_nursery_rule_path(new_path)
+
+
 def load_cached_ruleset(cache_dir: Path, rule_contents: list[bytes]) -> Optional[capa.rules.RuleSet]:
     """
     load a cached ruleset from disk, using the given cache directory.

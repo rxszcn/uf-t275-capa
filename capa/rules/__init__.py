@@ -2555,6 +2555,11 @@ def get_rules(
     if enable_cache:
         ruleset = capa.rules.cache.load_cached_ruleset(cache_dir, rule_contents)
         if ruleset is not None:
+            # the cache identifier is derived from rule content only, so a cache hit
+            # may carry stale `capa/path`/`capa/nursery` metadata after pure file moves
+            # (e.g. a rule graduating from the nursery). refresh the path-derived
+            # metadata against the current file system layout instead of re-parsing.
+            capa.rules.cache.refresh_ruleset_path_metadata(ruleset, rule_file_paths, rule_contents)
             return ruleset
 
     rules: list[Rule] = []
